@@ -1,3 +1,23 @@
+/* search_full.cpp
+
+   GNU Chess engine
+
+   Copyright (C) 2001-2011 Free Software Foundation, Inc.
+
+   This program is free software: you can redistribute it and/or modify
+   it under the terms of the GNU General Public License as published by
+   the Free Software Foundation, either version 3 of the License, or
+   (at your option) any later version.
+
+   This program is distributed in the hope that it will be useful,
+   but WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+   GNU General Public License for more details.
+
+   You should have received a copy of the GNU General Public License
+   along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/
+
 
 // search_full.cpp
 
@@ -24,6 +44,8 @@
 #include "util.h"
 #include "value.h"
 
+#include "nnue.h"
+
 // constants and variables
 
 // main search
@@ -32,7 +54,7 @@ static const bool UseDistancePruning = true;
 
 // transposition table
 
-static const bool UseTrans = true;
+bool UseTrans = true;
 static const int TransDepth = 1;
 
 static const bool UseMateValues = true; // use mate values from shallower searches?
@@ -85,6 +107,8 @@ static const int NodeAll = -1;
 static const int NodePV  =  0;
 static const int NodeCut = +1;
 
+static const int SearchTempo = 11;
+
 // macros
 
 #define NODE_OPP(type)     (-(type))
@@ -112,6 +136,23 @@ static bool capture_is_dangerous (int move, const board_t * board);
 static bool simple_stalemate     (const board_t * board);
 
 // functions
+
+// eval_()
+
+int eval_(const board_t* b)
+{
+   //return eval(b);
+   int ev;
+
+#ifdef USE_NNUE
+   ev = SearchTempo + evaluate_nnue(b, 1);
+   ev = (100 - b->ply_nb) * ev / 100;
+#else
+   ev = eval(b);
+#endif
+
+   return ev;
+}
 
 // search_full_init()
 
@@ -250,6 +291,8 @@ static int full_root(list_t * list, board_t * board, int alpha, int beta, int de
 
    // init
 
+   init_nnue_acc(board);
+
    SearchCurrent->node_nb++;
    SearchInfo->check_nb--;
 
@@ -259,6 +302,9 @@ static int full_root(list_t * list, board_t * board, int alpha, int beta, int de
    best_value = ValueNone;
 
    // move loop
+
+   NNUEChangeList q;
+   q.idx = 0;
 
    for (i = 0; i < LIST_SIZE(list); i++) {
 
@@ -273,7 +319,9 @@ static int full_root(list_t * list, board_t * board, int alpha, int beta, int de
 
       new_depth = full_new_depth(depth,move,board,board_is_check(board)&&LIST_SIZE(list)==1,true);
 
+      determine_changes(move, board, &q);
       move_do(board,move,undo);
+      update_do(&q, move, board);
 
       if (search_type == SearchShort || best_value == ValueNone) { // first move
          value = -full_search(board,-beta,-alpha,new_depth,height+1,new_pv,NodePV);
@@ -289,6 +337,8 @@ static int full_root(list_t * list, board_t * board, int alpha, int beta, int de
       }
 
       move_undo(board,move,undo);
+
+      update_undo(&q, board);
 
       if (value <= alpha) { // upper bound
          list->value[i] = old_alpha;
@@ -458,7 +508,7 @@ static int full_search(board_t * board, int alpha, int beta, int depth, int heig
 
    // height limit
 
-   if (height >= HeightMax-1) return eval(board);
+   if (height >= HeightMax-1) return eval_(board);
 
    // more init
 
@@ -477,7 +527,7 @@ static int full_search(board_t * board, int alpha, int beta, int depth, int heig
       if (!in_check
        && !value_is_mate(beta)
        && do_null(board)
-       && (!UseNullEval || depth <= NullReduction+1 || eval(board) >= beta)) {
+       && (!UseNullEval || depth <= NullReduction+1 || eval_(board) >= beta)) {
 
          // null-move search
 
@@ -549,6 +599,9 @@ static int full_search(board_t * board, int alpha, int beta, int depth, int heig
 
    opt_value = +ValueInf;
 
+   NNUEChangeList q;
+   q.idx = 0;
+
    while ((move=sort_next(sort)) != MoveNone) {
 
       // extensions
@@ -587,7 +640,7 @@ static int full_search(board_t * board, int alpha, int beta, int depth, int heig
             // optimistic evaluation
 
             if (opt_value == +ValueInf) {
-               opt_value = eval(board) + FutilityMargin;
+               opt_value = eval_(board) + FutilityMargin;
                ASSERT(opt_value<+ValueInf);
             }
 
@@ -609,7 +662,10 @@ static int full_search(board_t * board, int alpha, int beta, int depth, int heig
 
       // recursive search
 
+      determine_changes(move, board, &q);
       move_do(board,move,undo);
+      update_do(&q, move, board);
+
 
       if (node_type != NodePV || best_value == ValueNone) { // first move
          value = -full_search(board,-beta,-alpha,new_depth,height+1,new_pv,NODE_OPP(node_type));
@@ -633,6 +689,8 @@ static int full_search(board_t * board, int alpha, int beta, int depth, int heig
       }
 
       move_undo(board,move,undo);
+
+      update_undo(&q, board);
 
       played[played_nb++] = move;
 
@@ -748,13 +806,19 @@ static int full_no_null(board_t * board, int alpha, int beta, int depth, int hei
 
    sort_init(sort,board,attack,depth,height,trans_move);
 
+   NNUEChangeList q;
+   q.idx = 0;
+
    while ((move=sort_next(sort)) != MoveNone) {
 
       new_depth = full_new_depth(depth,move,board,false,false);
 
+      determine_changes(move, board, &q);
       move_do(board,move,undo);
+      update_do(&q, move, board);
       value = -full_search(board,-beta,-alpha,new_depth,height+1,new_pv,NODE_OPP(node_type));
       move_undo(board,move,undo);
+      update_undo(&q, board);
 
       if (value > best_value) {
          best_value = value;
@@ -858,7 +922,7 @@ static int full_quiescence(board_t * board, int alpha, int beta, int depth, int 
 
    // height limit
 
-   if (height >= HeightMax-1) return eval(board);
+   if (height >= HeightMax-1) return eval_(board);
 
    // more init
 
@@ -876,7 +940,7 @@ static int full_quiescence(board_t * board, int alpha, int beta, int depth, int 
 
       // stand pat
 
-      value = eval(board);
+      value = eval_(board);
 
       ASSERT(value>best_value);
       best_value = value;
@@ -894,6 +958,9 @@ static int full_quiescence(board_t * board, int alpha, int beta, int depth, int 
    // move loop
 
    sort_init_qs(sort,board,attack,depth>=CheckDepth);
+
+   NNUEChangeList q;
+   q.idx = 0;
 
    while ((move=sort_next_qs(sort)) != MoveNone) {
 
@@ -934,9 +1001,12 @@ static int full_quiescence(board_t * board, int alpha, int beta, int depth, int 
          }
       }
 
+      determine_changes(move, board, &q);
       move_do(board,move,undo);
+      update_do(&q, move, board);
       value = -full_quiescence(board,-beta,-alpha,depth-1,height+1,new_pv);
       move_undo(board,move,undo);
+      update_undo(&q, board);
 
       if (value > best_value) {
          best_value = value;
