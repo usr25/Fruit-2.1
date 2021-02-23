@@ -1,0 +1,5 @@
+*.o
+fruit
+*.pgn
+*.fen
+.depend
